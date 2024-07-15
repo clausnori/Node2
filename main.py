@@ -1,212 +1,161 @@
 import asyncio
-import websockets
-import websocket
 import json
+import zstandard as zstd
+import base64
+import ast
+import math
+import hashlib
+import rsa
 
-class User():
-  def __init__(self):
-    self.ip = "0.0.0.0"
-    self.port = 8768
-    self.pull = {"0.0.0.0":[[1, "1.7.8.9", 8766]]}
-  def get_ip(self):
-    return self.ip
-  def get_port(self):
-    return self.port
-  def set_pull(self,pull):
-    self.pull = pull
-  def get_pull(self):
-    return self.pull
-class Server(User):
-  
-  def __init__(self,port):
-    User.__init__(self)
-    
-    self.ip = self.get_ip()
-    self.port = self.get_port()
-  def add_pull(self,data):
-    ip = self.get_ip()
-    pull = self.get_pull()
-    pull[ip].append(data)
-    pull = self.set_pull(pull)
-    print("addpull",self.get_pull())
-  async def handle_connection(self,websocket, path):
-      print("New connection established")
-      try:
-          async for message in websocket:
-              try:
-                  print(f"System:Received message: {message}")
-                  request = json.loads(message)
-                  action = request.get("action")
-  
-                  if action == "get_pull":
-                      pull = self.get_pull()
-                      await websocket.send(json.dumps(pull))
-                  
-                  elif action == "get_data":
-                      data = [["0.0.0.0", "Simple Data User2", "hdhdhdhhdhhdhhd"]
-                      ]
-                      await websocket.send(json.dumps(data))
-                  
-                  elif action == "send_user_data":
-                      user_data = request.get("data")
-                      print(f"System:Received user data: {user_data}")
-                      await websocket.send(json.dumps({"status": "User data received"}))
-                  
-                  elif action == "send_data":
-                      data = request.get("data")
-                      print(f"System:Received data: {data}")
-                      self.add_pull(data)
-                      await websocket.send(json.dumps({"status": "Data received"}))
-                  
-                  else:
-                      await websocket.send(json.dumps({"error": "Unknown action"}))
-              
-              except json.JSONDecodeError:
-                  await websocket.send(json.dumps({"error": "Invalid JSON"}))
-      except websockets.ConnectionClosedError as e:
-          print(f"Connection closed with error: {e}")
-      except Exception as e:
-          print(f"An error occurred: {e}")
-      finally:
-          print("Connection closed")
-class Connect(User):
-    def __init__(self,ip,port,my_port):
-      User.__init__(self)
-      print("Run Node²: ")
-      self.port = port
-      self.con(self.ip,self.port)
-      self.pull = self.get_pull()
-    def send_ind(self,ip,port):
-      new = [0,ip,port]
-      return new
-    def con(self,ip,port):
-      try:
-            self.ws = websocket.create_connection(f"ws://{ip}:{port}")
-            print(f"Connected to Node² server {ip}:{port}")
-      except Exception as e:
-            print(f"Failed to connect to Node² server {ip},{port}: {e}")
-    def get_pull(self):
+class Node:
+    def __init__(self, ip: str, port: int):
+        self.ip = ip
+        self.port = port
+        self.reader = None
+        self.writer = None
+        self.peers = []
+
+    async def connect(self) -> None:
+        self.reader, self.writer = await asyncio.open_connection(self.ip, self.port)
+        print(f"Connected to server {self.ip}:{self.port}")
+
+    async def send_data(self, action: str, data: dict) -> dict:
         try:
-            self.ws.send(json.dumps({"action": "get_pull"}))
-            pull = json.loads(self.ws.recv())
-            print(f"Received pull data: {pull}")
-            return pull
+            message = json.dumps({"action": action, "data": data}).encode()
+            self.writer.write(message)
+            await self.writer.drain()
+            response_data = await self.reader.read(2000)
+            return json.loads(response_data.decode())
         except Exception as e:
-            print(f"Error getting pull: {e}")
+            print(f"Error sending data: {e}")
             return {}
 
-    def search(self, ip, ip2):
-        self.pull = self.get_pull()
-        if not self.pull:
-            return None
-        t = self.pull[ip]
-        for i in range(len(t)):
-            self.a = t[i][1]
-            self.b = t[i][2]
-            if self.a == ip2:
-              self.data_user = self.search_data(self.a)
-            else:
-              self.con(self.a,self.b)
-              self.search(self.a, ip2)
+    async def close(self) -> None:
         try:
-          print("@search",self.data_user)
-          return self.data_user
-          self.close()
-        except(AttributeError):
-          print("FATAL ERORR")
-    # data_pull
-    def get_data(self):
-        try:
-            self.ws.send(json.dumps({"action": "get_data"}))
-            data = json.loads(self.ws.recv())
-            print(f"System:Received data: {data}")
-            return data
-        except Exception as e:
-            print(f"Error getting data: {e}")
-            return []
-
-    def search_data(self, ip):
-        data = self.get_data()
-        for i in range(len(data)):
-            try:
-                if data[i][0] == ip:
-                    return [data[i][1], data[i][2]]
-            except IndexError:
-                print(f"Non Found Data for {ip}")
-
-    def close(self):
-        try:
-            self.ws.close()
-            print("WebSocket connection closed")
+            if self.writer:
+                self.writer.close()
+                await self.writer.wait_closed()
+                print(f"Connection closed for {self.ip}:{self.port}")
         except Exception as e:
             print(f"Error closing connection: {e}")
 
-    # Function to send user data to the server
-    def send_user_data(self, user_data):
+    async def share_node_info(self) -> None:
         try:
-            message = {
-                "action": "send_user_data",
-                "data": user_data
-            }
-            self.ws.send(json.dumps(message))
-            response = json.loads(self.ws.recv())
-            #print(f"Server response: {response}")
-            return response
+            message = {"action": "share_info", "data": {"ip": self.ip, "port": self.port}}
+            response = await self.send_data("share_info", message)
+            new_peers = response.get("peers", [])
+            self.peers.extend(new_peers)
+            print(f"Updated peers: {self.peers}")
         except Exception as e:
-            print(f"Error sending user data: {e}")
-            return None
+            print(f"Error sharing node info: {e}")
 
-    # Function to send arbitrary data to the server
-    def send_data(self, data):
-        try:
-            message = {
-                "action": "send_data",
-                "data": data
-            }
-            self.ws.send(json.dumps(message))
-            response = json.loads(self.ws.recv())
-            print(f"Server response: {response}")
-            return response
-        except Exception as e:
-            print(f"Error sending data: {e}")
-            return None
-def client(ip,port,ip3,my_ip):
-  user_data = User()
-  com = Connect(ip,port,my_ip)
-  try:
-      # Send arbitrary data
-      arbitrary_data = com.send_ind(user_data.ip,user_data.port)
-      response = com.send_data(arbitrary_data)
-      print(response)
-      test = com.search(ip, ip3)
+    async def discover_peers(self) -> None:
+        for peer in self.peers:
+            try:
+                peer_node = Node(peer["ip"], peer["port"])
+                await peer_node.connect()
+                await peer_node.share_node_info()
+                await peer_node.close()
+            except Exception as e:
+                print(f"Error discovering peers: {e}")
 
-      return test
-  finally:
-      com.close()
-def server(my_port):
-  root = Server(my_port)
-  start_server = websockets.serve(root.handle_connection,root.ip,root.port)
-  print(f"Node² server is running on ws://localhost:{root.port}")
-  asyncio.get_event_loop().run_until_complete(start_server)
-  asyncio.get_event_loop().run_forever()
-def main():
-  user_data = User()
-  hi = """
-  Welcom in Node²:
-  Connect: yes or No
-  Run Server Node²:server
-  """
-  print(hi)
-  while True:
-    user = input("Node² connect(yes/no): ")
-    if user == "yes":
-      ip = input("Node² IP: ")
-      port = int(input("Node² PORT: "))
-      ip3 = input("Node² Find(data) IP: ")
-      print(client(ip,port,ip3,user_data.get_ip()))
-      user = input("Node² connect(yes/no): ")
-    elif user == "server":
-      server(user_data.get_port())
+def generate_keys() -> None:
+    public_key, private_key = rsa.newkeys(2048)
+    with open("public_key.rsa", 'w') as pub_file, open("private_key.rsa", 'w') as priv_file:
+        pub_file.write(public_key.save_pkcs1().decode())
+        priv_file.write(private_key.save_pkcs1().decode())
+    print("Keys generated successfully")
+
+def read_file(filepath: str) -> str:
+    with open(filepath, 'r') as file:
+        return file.read()
+
+def get_private_key() -> rsa.PrivateKey:
+    return rsa.PrivateKey.load_pkcs1(read_file("private_key.rsa").encode())
+
+def get_public_key() -> rsa.PublicKey:
+    return rsa.PublicKey.load_pkcs1(read_file("public_key.rsa").encode())
+
+def encrypt_data(data: str) -> str:
+    key = get_public_key()
+    encrypted_message = rsa.encrypt(data.encode(), key)
+    return base64.b64encode(encrypted_message).decode()
+
+def decrypt_data(data: str) -> str:
+    key = get_private_key()
+    encrypted_message = base64.b64decode(data.encode())
+    return rsa.decrypt(encrypted_message, key).decode()
+
+def get_hash(text: str) -> str:
+    sha256 = hashlib.sha256()
+    sha256.update(text.encode('utf-8'))
+    return sha256.hexdigest()
+
+def encode_and_split(data: str, num_parts: int) -> list[str]:
+    data_bytes = data.encode('utf-8')
+    compressed_data = zstd.compress(data_bytes)
+    part_size = math.ceil(len(compressed_data) / num_parts)
+    parts = [compressed_data[i*part_size:(i+1)*part_size] for i in range(num_parts)]
+    return [base64.b64encode(part).decode('utf-8') for part in parts]
+
+async def distribute_data(data: str, users: list[tuple[str, int]], suma: str) -> None:
+    parts = encode_and_split(data, len(users))
+    
+    for i, (ip, port) in enumerate(users):
+        node = Node(ip, port)
+        await node.connect()
+        
+        next_node = {"ip": "END", "port": "END"} if i == len(users) - 1 else {"ip": users[i + 1][0], "port": users[i + 1][1]}
+        message = ["Node_Data", suma, parts[i], next_node]
+        
+        await node.send_data("post_pull", message)
+        await node.close()
+
+async def send_data(ip: str, port: int, data: str) -> str:
+    node = Node(ip, port)
+    await node.connect()
+    try:
+        response = await node.send_data("post_data", {"message": data})
+        block = await node.send_data("get_data", {})
+        await node.close()
+
+        if block.get('next_node') != "END":
+            next_ip = block['next_node']['ip']
+            next_port = block['next_node']['port']
+            return await send_data(next_ip, next_port, data)
+        else:
+            return base64.b64decode(block['data_part']).decode()
+    except Exception as e:
+        print(f"Error in send_data: {e}")
+    finally:
+        await node.close()
+
+def save_id(data: list, hash_sum: str) -> None:
+    with open(hash_sum, 'w') as file:
+        file.write(str(data))
+
+def get_id(id_: str) -> list:
+    with open(id_, 'r') as file:
+        return ast.literal_eval(file.read())
+
+async def main(data: str, method: str) -> None:
+    users = [("0.0.0.0", 8767), ("0.0.0.0", 8765)]
+    encrypted_data = encrypt_data(data)
+    data_hash = get_hash(data)
+    public_key = get_public_key().save_pkcs1().decode()
+    
+    main_data = ["Node_ID", data_hash, public_key, [users[0][0], users[0][1]]]
+    save_id(main_data, data_hash)
+    
+    if method == "post":
+        await distribute_data(encrypted_data, users, data_hash)
+    elif method == "get":
+        result = await send_data(users[0][0], users[0][1], main_data)
+        decrypted_result = decrypt_data(result)
+        print(decrypted_result)
     else:
-      break
-main()
+        print("Invalid method")
+
+if __name__ == "__main__":
+    input_data = "My name Claus ,hi node"
+    asyncio.run(main(input_data, "post"))
